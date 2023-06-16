@@ -52,10 +52,14 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   speed_to_erpm_offset_ = declare_parameter("speed_to_erpm_offset").get<double>();
   steering_to_servo_gain_ = declare_parameter("steering_angle_to_servo_gain").get<double>();
   steering_to_servo_offset_ = declare_parameter("steering_angle_to_servo_offset").get<double>();
+  accel_to_current_gain_ = declare_parameter("accel_to_current_gain").get<double>();
+  accel_to_brake_gain_ = declare_parameter("accel_to_brake_gain").get<double>();
 
   // create publishers to vesc electric-RPM (speed) and servo commands
   erpm_pub_ = create_publisher<Float64>("commands/motor/speed", 10);
   servo_pub_ = create_publisher<Float64>("commands/servo/position", 10);
+  current_pub_ = create_publisher<Float64>("commands/motor/current", 10);
+  brake_pub_ = create_publisher<Float64>("commands/servo/brake", 10);
 
   // subscribe to ackermann topic
   ackermann_sub_ = create_subscription<AckermannDriveStamped>(
@@ -68,14 +72,49 @@ void AckermannToVesc::ackermannCmdCallback(const AckermannDriveStamped::SharedPt
   Float64 erpm_msg;
   erpm_msg.data = speed_to_erpm_gain_ * cmd->drive.speed + speed_to_erpm_offset_;
 
+  // calc vesc current/brake (acceleration)
+  bool is_positive_accel = true;
+  Float64 current_msg;
+  Float64 brake_msg;
+  current_msg.data = 0;
+  brake_msg.data = 0;
+
+  if (cmd->drive.acceleration < 0) {
+    brake_msg.data = accel_to_brake_gain_ * cmd->drive.acceleration;
+    is_positive_accel = false;
+  }
+  else {
+    current_msg.data = accel_to_current_gain_ * cmd->drive.acceleration;
+  }
+
   // calc steering angle (servo)
   Float64 servo_msg;
   servo_msg.data = steering_to_servo_gain_ * cmd->drive.steering_angle + steering_to_servo_offset_;
 
   // publish
   if (rclcpp::ok()) {
-    erpm_pub_->publish(erpm_msg);
+    if (erpm_msg.data != 0 || previous_mode_speed_) {
+      erpm_pub_->publish(erpm_msg);
+    }
+    else {
+      if (is_positive_accel) {
+        current_pub_->publish(current_msg);
+      }
+      else {
+        brake_pub_->publish(brake_msg);
+      }
+    }
     servo_pub_->publish(servo_msg);
+  }
+
+  // the lines below are to determine which mode wer are in so we can hold until new messages force a switch
+  if (erpm_msg.data != 0)
+  {
+    previous_mode_speed_ = true;
+  }
+  else if (current_msg.data != 0 || brake_msg.data != 0)
+  {
+    previous_mode_speed_ = false;
   }
 }
 
